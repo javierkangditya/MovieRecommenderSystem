@@ -1,0 +1,662 @@
+---
+title: "Movie Recommendation System: KNN vs Matrix Factorization"
+author: "Javier Kangditya"
+output: html_document
+---
+
+# Introduction
+
+## Project Overview
+The goal of this project is to build and compare two different recommendation systems for movies based on user rating behavior. The models used in this project are **K-Nearest Neighbors (KNN)** and **Matrix Factorization (SVD)**. The objective is to understand how each method performs in predicting user preferences and generating personalized movie recommendations.
+
+## Dataset Description
+The dataset is obtained from MovieLens and contains two main files used in this project:
+
+- **rating.csv**  
+  Contains user-movie interactions with the following features:
+  - userId  
+  - movieId  
+  - rating  
+  - timestamp  
+
+- **movie.csv**  
+  Contains movie metadata including:
+  - movieId  
+  - title  
+  - genres  
+
+The dataset represents a user-item rating matrix that will be used for collaborative filtering techniques.
+
+## Project Goals
+1. Load and preprocess movie rating data  
+2. Build a user-item matrix for recommendation  
+3. Implement K-Nearest Neighbors (KNN) based recommender system  
+4. Implement Matrix Factorization (SVD) based recommender system  
+5. Evaluate and compare both models  
+6. Generate movie recommendations for users  
+7. Provide insights on which method performs better for sparse rating data
+
+---
+
+# 1. Data Cleaning
+```{r load_and_clean, message=FALSE, warning=FALSE}
+# =========================================================
+# 1. LIBRARIES
+# =========================================================
+library(tidyverse)
+library(data.table)
+
+# =========================================================
+# 2. LOAD RAW DATA
+# =========================================================
+ratings_raw <- fread("Data/Raw/rating.csv")
+movies_raw  <- fread("Data/Raw/movie.csv")
+
+# RAW PREVIEW (LIGHTWEIGHT)
+cat("===== RAW DATA OVERVIEW =====\n")
+cat("Ratings dim:\n")
+print(dim(ratings_raw))
+
+cat("\nMovies dim:\n")
+print(dim(movies_raw))
+
+cat("\nSample Ratings:\n")
+print(head(ratings_raw, 5))
+
+cat("\nSample Movies:\n")
+print(head(movies_raw, 5))
+
+# =========================================================
+# 3. CLEAN DATA
+# =========================================================
+ratings <- unique(na.omit(ratings_raw))
+movies  <- unique(na.omit(movies_raw))
+
+# Type conversion (FAST data.table style)
+ratings[, userId := as.integer(userId)]
+ratings[, movieId := as.integer(movieId)]
+ratings[, rating  := as.numeric(rating)]
+
+movies[, movieId := as.integer(movieId)]
+movies[, title   := as.character(title)]
+movies[, genres  := as.character(genres)]
+
+# =========================================================
+# 4. FILTER SPARSE DATA 
+# =========================================================
+user_counts  <- ratings[, .N, by = userId]
+movie_counts <- ratings[, .N, by = movieId]
+
+ratings <- ratings[
+  userId %in% user_counts[N >= 10, userId] &
+  movieId %in% movie_counts[N >= 5, movieId]
+]
+
+# =========================================================
+# 5. FINAL CLEANED CHECK
+# =========================================================
+cat("\n===== CLEANED DATA OVERVIEW =====\n")
+cat("Ratings dim:\n")
+print(dim(ratings))
+
+cat("\nMovies dim:\n")
+print(dim(movies))
+
+# =========================================================
+# 6. SAVE PROCESSED DATA
+# =========================================================
+saveRDS(ratings, "Data/Processed/ratings_clean.rds")
+saveRDS(movies, "Data/Processed/movies_clean.rds")
+
+# =========================================================
+# 7. LOAD & PREVIEW PROCESSED DATA
+# =========================================================
+ratings <- readRDS("Data/Processed/ratings_clean.rds")
+movies  <- readRDS("Data/Processed/movies_clean.rds")
+
+cat("\n===== PROCESSED DATA OVERVIEW =====\n")
+
+cat("Processed Ratings dim:\n")
+print(dim(ratings))
+
+cat("\nProcessed Movies dim:\n")
+print(dim(movies))
+
+cat("\nProcessed Ratings Sample:\n")
+print(head(ratings, 5))
+
+cat("\nProcessed Movies Sample:\n")
+print(head(movies, 5))
+```
+
+---
+
+# 2. Exploratory Data Analysis 
+```{r eda, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+
+# =========================================================
+# LOAD DATA
+# =========================================================
+ratings <- readRDS("Data/Processed/ratings_clean.rds")
+movies  <- readRDS("Data/Processed/movies_clean.rds")
+
+# =========================================================
+# GLOBAL CLEAN (IMPORTANT FIX)
+# =========================================================
+ratings <- ratings %>%
+  filter(!is.na(userId), !is.na(movieId), !is.na(rating))
+
+# =========================================================
+# 1. DATA SUMMARY
+# =========================================================
+cat("===== DATA SUMMARY =====\n")
+cat("Total Users:", n_distinct(ratings$userId), "\n")
+cat("Total Movies:", n_distinct(ratings$movieId), "\n")
+cat("Total Ratings:", nrow(ratings), "\n")
+
+# =========================================================
+# 2. RATING DISTRIBUTION
+# =========================================================
+p1 <- ggplot(ratings, aes(x = rating)) +
+  geom_histogram(binwidth = 0.5, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Rating Distribution", x = "Rating", y = "Count")
+
+ggsave("Outputs/Figures/01_rating_distribution.png", p1, width = 6, height = 4)
+print(p1)
+
+# =========================================================
+# 3. USER ACTIVITY
+# =========================================================
+user_activity <- ratings %>% count(userId)
+
+p2 <- ggplot(user_activity, aes(x = n)) +
+  geom_histogram(binwidth = 10, fill = "darkgreen", color = "black") +
+  theme_minimal() +
+  labs(title = "User Activity Distribution", x = "Number of Ratings", y = "Users")
+
+ggsave("Outputs/Figures/02_user_activity.png", p2, width = 6, height = 4)
+print(p2)
+
+# =========================================================
+# 4. USER ACTIVITY VS AVG RATING
+# =========================================================
+user_stats <- ratings %>%
+  group_by(userId) %>%
+  summarise(
+    n_ratings = n(),
+    avg_rating = mean(rating),
+    .groups = "drop"
+  )
+
+p3 <- ggplot(user_stats, aes(x = n_ratings, y = avg_rating)) +
+  geom_point(alpha = 0.3) +
+  theme_minimal() +
+  labs(title = "User Activity vs Average Rating",
+       x = "Number of Ratings",
+       y = "Average Rating")
+
+ggsave("Outputs/Figures/03_user_activity_vs_rating.png", p3, width = 7, height = 5)
+print(p3)
+
+# =========================================================
+# 5. MOVIE POPULARITY
+# =========================================================
+movie_popularity <- ratings %>%
+  count(movieId) %>%
+  arrange(desc(n)) %>%
+  head(10) %>%
+  left_join(movies, by = "movieId")
+
+cat("\n===== TOP 10 MOST RATED MOVIES =====\n")
+print(movie_popularity[, c("title", "n")])
+
+write.csv(movie_popularity, "Outputs/Tables/movie_popularity.csv", row.names = FALSE)
+
+# =========================================================
+# 6. TOP RATED MOVIES
+# =========================================================
+top_rated <- ratings %>%
+  group_by(movieId) %>%
+  summarise(
+    avg_rating = mean(rating),
+    count = n(),
+    .groups = "drop"
+  ) %>%
+  filter(count >= 20) %>%
+  arrange(desc(avg_rating)) %>%
+  head(10) %>%
+  left_join(movies, by = "movieId")
+
+p4 <- ggplot(top_rated, aes(x = reorder(title, avg_rating), y = avg_rating)) +
+  geom_bar(stat = "identity", fill = "orange") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Top Rated Movies", x = "Movie", y = "Average Rating")
+
+ggsave("Outputs/Figures/04_top_rated_movies.png", p4, width = 7, height = 5)
+print(p4)
+
+# =========================================================
+# 7. SPARSITY 
+# =========================================================
+n_users  <- as.numeric(n_distinct(ratings$userId))
+n_movies <- as.numeric(n_distinct(ratings$movieId))
+n_ratings <- as.numeric(nrow(ratings))
+
+cat("DEBUG TYPES:\n")
+cat("n_users:", n_users, typeof(n_users), "\n")
+cat("n_movies:", n_movies, typeof(n_movies), "\n")
+cat("n_ratings:", n_ratings, typeof(n_ratings), "\n")
+
+# HARD CHECK
+if (any(is.na(c(n_users, n_movies, n_ratings)))) {
+  stop("NA detected in counts — data issue")
+}
+
+total_possible <- n_users * n_movies
+
+cat("Total possible:", total_possible, "\n")
+
+if (is.na(total_possible) || total_possible <= 0) {
+  stop("Invalid total_possible")
+}
+
+sparsity <- 1 - (n_ratings / total_possible)
+
+cat("\n===== SPARSITY =====\n")
+cat("Sparsity:", round(sparsity, 8), "\n")
+
+# =========================================================
+# SAVE SUMMARY
+# =========================================================
+summary_table <- data.frame(
+  Users = n_users,
+  Movies = n_movies,
+  Ratings = nrow(ratings),
+  Sparsity = sparsity
+)
+
+write.csv(summary_table, "Outputs/Tables/eda_summary.csv", row.names = FALSE)
+```
+
+---
+
+# 3. User-Item Matrix & Data Splitting
+```{r matrix_split, message=FALSE, warning=FALSE}
+# =========================================================
+# LOAD LIBRARIES
+# =========================================================
+library(recommenderlab)
+library(Matrix)
+library(tidyverse)
+
+# =========================================================
+# LOAD CLEAN DATA
+# =========================================================
+ratings <- readRDS("Data/Processed/ratings_clean.rds")
+
+# =========================================================
+# GLOBAL CLEAN 
+# =========================================================
+ratings <- ratings %>%
+  filter(!is.na(userId), !is.na(movieId), !is.na(rating))
+
+# =========================================================
+# CREATE USER–ITEM MATRIX (SPARSE)
+# =========================================================
+
+# Convert userId & movieId to index
+user_index  <- as.numeric(factor(ratings$userId))
+movie_index <- as.numeric(factor(ratings$movieId))
+
+# Build sparse matrix
+rating_matrix <- sparseMatrix(
+  i = user_index,
+  j = movie_index,
+  x = ratings$rating
+)
+
+cat("Matrix Dimension:\n")
+cat("Users:", nrow(rating_matrix), "\n")
+cat("Movies:", ncol(rating_matrix), "\n")
+
+# =========================================================
+# CONVERT TO recommenderlab FORMAT
+# =========================================================
+rating_rrm <- as(rating_matrix, "realRatingMatrix")
+
+cat("\nRealRatingMatrix Summary:\n")
+rating_rrm
+
+# =========================================================
+# TRAIN–TEST SPLIT
+# =========================================================
+set.seed(123)
+
+eval_scheme <- evaluationScheme(
+  data = rating_rrm,
+  method = "split",
+  train = 0.8,
+  given = 10,
+  goodRating = 4
+)
+
+cat("\nEvaluation Scheme Created\n")
+
+# =========================================================
+# EXTRACT TRAIN & TEST DATA
+# =========================================================
+train_data <- getData(eval_scheme, "train")
+known_data <- getData(eval_scheme, "known")
+unknown_data <- getData(eval_scheme, "unknown")
+
+cat("\nTrain/Test Split Summary:\n")
+train_data
+known_data
+unknown_data
+
+# =========================================================
+# SAVE OBJECTS 
+# =========================================================
+saveRDS(rating_rrm, "Data/Processed/rating_matrix.rds")
+saveRDS(eval_scheme, "Data/Processed/eval_scheme.rds")
+```
+
+---
+
+# 4. Modeling and Recommendation System
+```{r modeling, message=FALSE, warning=FALSE}
+library(recommenderlab)
+
+# =========================================================
+# 1. LOAD DATA
+# =========================================================
+eval_scheme <- readRDS("Data/Processed/eval_scheme.rds")
+
+train <- getData(eval_scheme, "train")
+known   <- getData(eval_scheme, "known")
+unknown <- getData(eval_scheme, "unknown")
+
+n <- min(100, nrow(known))
+
+known_small   <- known[1:n, ]
+unknown_small <- unknown[1:n, ]
+
+# =========================================================
+# 2. MODELS
+# =========================================================
+
+# POPULAR
+model_pop <- Recommender(train, method = "POPULAR")
+
+# MATRIX FACTORIZATION (LIBMF / fallback SVD)
+model_mf <- tryCatch({
+  Recommender(train, method = "LIBMF",
+              parameter = list(dim = 10, iter = 30, lambda = 0.01))
+}, error = function(e) {
+  Recommender(train, method = "SVD", parameter = list(k = 10))
+})
+
+# KNN (IBCF - reduced size for stability)
+train_small <- train[1:min(500, nrow(train)), ]
+
+model_knn <- Recommender(
+  train_small,
+  method = "IBCF",
+  parameter = list(k = 30)
+)
+
+# =========================================================
+# 3. PREDICTIONS
+# =========================================================
+pred_pop <- predict(model_pop, known_small, n = 10)
+pred_mf  <- predict(model_mf,  known_small, n = 10)
+pred_knn <- predict(model_knn, known_small, n = 10)
+
+# =========================================================
+# 4. GROUND TRUTH 
+# =========================================================
+get_actual <- function(test_data) {
+
+  lapply(1:nrow(test_data), function(i) {
+
+    user <- as(test_data[i, ], "list")[[1]]
+
+    if (length(user) == 0) return(character(0))
+
+    names(user[user > 0])
+  })
+}
+
+actual <- lapply(1:nrow(unknown_small), function(i) {
+
+  user <- as(unknown_small[i, ], "list")[[1]]
+
+  if (length(user) == 0) return(character(0))
+
+  names(user)
+})
+
+# =========================================================
+# 5. METRICS
+# =========================================================
+
+recall_at_k <- function(pred, actual, k = 10) {
+
+  pred_list <- as(pred, "list")
+  scores <- c()
+
+  for (i in seq_along(pred_list)) {
+
+    if (i > length(actual)) break
+
+    p <- pred_list[[i]][1:k]
+    a <- actual[[i]]
+
+    if (length(a) == 0) next
+
+    hits <- length(intersect(p, a))
+    scores <- c(scores, hits / length(a))
+  }
+
+  if (length(scores) == 0) return(0)
+  mean(scores)
+}
+
+map_at_k <- function(pred, actual, k = 10) {
+
+  pred_list <- as(pred, "list")
+  ap <- c()
+
+  for (i in seq_along(pred_list)) {
+
+    if (i > length(actual)) break
+
+    p <- pred_list[[i]][1:k]
+    a <- actual[[i]]
+
+    if (length(a) == 0) next
+
+    hit <- 0
+    sum_prec <- 0
+
+    for (j in seq_along(p)) {
+      if (p[j] %in% a) {
+        hit <- hit + 1
+        sum_prec <- sum_prec + hit / j
+      }
+    }
+
+    if (hit > 0) {
+      ap <- c(ap, sum_prec / min(length(a), k))
+    }
+  }
+
+  if (length(ap) == 0) return(0)
+  mean(ap)
+}
+
+dcg <- function(rel) {
+  sum(rel / log2(seq_along(rel) + 1))
+}
+
+ndcg_at_k <- function(pred, actual, k = 10) {
+
+  pred_list <- as(pred, "list")
+  scores <- c()
+
+  for (i in seq_along(pred_list)) {
+
+    if (i > length(actual)) break
+
+    p <- pred_list[[i]][1:k]
+    a <- actual[[i]]
+
+    if (length(a) == 0) next
+
+    rel <- as.numeric(p %in% a)
+    ideal <- sort(rel, decreasing = TRUE)
+
+    dcg_val <- dcg(rel)
+    idcg_val <- dcg(ideal)
+
+    if (idcg_val == 0) next
+
+    scores <- c(scores, dcg_val / idcg_val)
+  }
+
+  if (length(scores) == 0) return(0)
+  mean(scores)
+}
+
+# =========================================================
+# 6. EVALUATION RESULTS
+# =========================================================
+results <- data.frame(
+  model = c("POPULAR", "MF", "KNN (IBCF)"),
+
+  recall_at_10 = c(
+    recall_at_k(pred_pop, actual),
+    recall_at_k(pred_mf, actual),
+    recall_at_k(pred_knn, actual)
+  ),
+
+  map_at_10 = c(
+    map_at_k(pred_pop, actual),
+    map_at_k(pred_mf, actual),
+    map_at_k(pred_knn, actual)
+  ),
+
+  ndcg_at_10 = c(
+    ndcg_at_k(pred_pop, actual),
+    ndcg_at_k(pred_mf, actual),
+    ndcg_at_k(pred_knn, actual)
+  )
+)
+
+print(results)
+
+# =========================================================
+# 7. SAVE OUTPUT
+# =========================================================
+saveRDS(model_pop, "Outputs/Models/popular.rds")
+saveRDS(model_mf,  "Outputs/Models/mf.rds")
+saveRDS(model_knn, "Outputs/Models/knn_ibcf.rds")
+
+write.csv(results,
+          "Outputs/Tables/model_results.csv",
+          row.names = FALSE)
+```
+
+---
+
+# 5. MODEL COMPARISON VISUALIZATION
+```{r visualization, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# =========================================================
+# 1. LOAD RESULTS 
+# =========================================================
+# results <- read.csv("Outputs/Tables/model_results.csv")
+
+# =========================================================
+# 2. RESHAPE DATA 
+# =========================================================
+results_long <- results %>%
+  pivot_longer(
+    cols = -model,
+    names_to = "metric",
+    values_to = "value"
+  )
+
+# =========================================================
+# 3. VISUALIZATION
+# =========================================================
+plot_model <- ggplot(results_long,
+                     aes(x = model, y = value, fill = model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~metric, scales = "free") +
+  theme_minimal() +
+  labs(
+    title = "Model Performance Comparison",
+    x = "Model",
+    y = "Score"
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 14, face = "bold")
+  )
+
+print(plot_model)
+
+# =========================================================
+# 4. SAVE PLOT
+# =========================================================
+ggsave(
+  "Outputs/Figures/model_comparison.png",
+  plot_model,
+  width = 8,
+  height = 5
+)
+```
+
+---
+
+# Conclusion & Insights
+
+## 1. Summary of Findings
+- **Recommendation System Evaluation:**  
+  - Three models were evaluated: POPULAR, Matrix Factorization (MF), and K-Nearest Neighbors (KNN).  
+  - Evaluation metrics used were Recall@10, MAP@10, and NDCG@10 to measure both retrieval quality and ranking performance.  
+  - The dataset shows a strong popularity bias, where a small number of frequently rated items dominate user preferences.  
+
+- **Model Performance:**  
+  - The POPULAR model achieved the best overall performance across all metrics, especially in MAP@10 and NDCG@10.  
+  - The MF model showed moderate performance but was limited by data sparsity and insufficient interaction density.  
+  - The KNN (IBCF) model performed the weakest, indicating that user-item similarity is not stable in sparse conditions.  
+
+- **Evaluation Insights:**  
+  - Recall@10 values are relatively low, which is expected in recommender systems with a large item space.  
+  - MAP@10 and NDCG@10 provide better insight into ranking quality, showing that POPULAR consistently ranks relevant items higher.  
+  - Overall, simpler baseline models can outperform more complex models depending on dataset characteristics.  
+
+---
+
+## 2. Practical Implications
+- Popularity-based recommendation is highly effective in datasets with strong item popularity bias.  
+- Matrix Factorization is more suitable when user-item interactions are denser and more balanced.  
+- KNN-based collaborative filtering is sensitive to sparsity and may not perform well without sufficient data.  
+- In real-world systems, baseline models like POPULAR remain strong benchmarks and should not be ignored.  
+
+---
+
+## 3. Recommendations
+- For production systems with sparse data, start with a **POPULAR baseline** as a strong benchmark.  
+- Improve MF performance by tuning hyperparameters (latent factors, regularization, iterations).  
+- Consider hybrid recommendation approaches (e.g., combining POPULAR + MF) to improve robustness.  
+- Collect more interaction data to improve collaborative filtering performance, especially for KNN-based models.  
